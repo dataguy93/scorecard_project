@@ -2,10 +2,14 @@ import base64
 import json
 import os
 import tempfile
+import urllib.error
+import urllib.request
 
 from flask import Flask, jsonify, request
 
 from ocr_engine import ocr_scorecard
+
+PLACES_AUTOCOMPLETE_URL = "https://places.googleapis.com/v1/places:autocomplete"
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = int(os.environ.get("MAX_UPLOAD_MB", "20")) * 1024 * 1024
@@ -82,6 +86,52 @@ def ocr_endpoint():
     finally:
         if tmp_path and os.path.exists(tmp_path):
             os.remove(tmp_path)
+
+
+@app.route("/places/autocomplete", methods=["OPTIONS"])
+def places_autocomplete_options():
+    return ("", 204)
+
+
+@app.post("/places/autocomplete")
+def places_autocomplete():
+    """Proxies Google Places Autocomplete (New) so the API key stays server-side.
+
+    Keeps the Places key in Secret Manager (exposed here as the
+    GOOGLE_PLACES_API_KEY env var) instead of shipping it in the mobile app.
+    Restricts results to golf courses and returns the raw Places response so the
+    client can parse it directly.
+    """
+    api_key = os.environ.get("GOOGLE_PLACES_API_KEY")
+    if not api_key:
+        return jsonify({"error": "Places lookup is not configured."}), 503
+
+    body = request.get_json(silent=True) or {}
+    user_input = (body.get("input") or "").strip()
+    if len(user_input) < 2:
+        return jsonify({"suggestions": []})
+
+    payload = json.dumps(
+        {"input": user_input, "includedPrimaryTypes": ["golf_course"]}
+    ).encode("utf-8")
+
+    proxied = urllib.request.Request(
+        PLACES_AUTOCOMPLETE_URL,
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "X-Goog-Api-Key": api_key,
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(proxied, timeout=10) as resp:
+            return (resp.read(), resp.status, {"Content-Type": "application/json"})
+    except urllib.error.HTTPError as exc:
+        return jsonify({"error": f"Places request failed: {exc.code}"}), 502
+    except Exception as exc:
+        return jsonify({"error": f"Places request failed: {exc}"}), 502
 
 
 if __name__ == "__main__":
