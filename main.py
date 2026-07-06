@@ -11,6 +11,14 @@ from ocr_engine import ocr_scorecard
 
 PLACES_AUTOCOMPLETE_URL = "https://places.googleapis.com/v1/places:autocomplete"
 
+# Place types requested per autocomplete "category" — lets the same proxy
+# serve both the golf-course search (round setup) and the city search (event
+# location) without exposing the Places API key to two different endpoints.
+PLACES_CATEGORY_TYPES = {
+    "golf_course": ["golf_course"],
+    "city": ["locality", "administrative_area_level_3"],
+}
+
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = int(os.environ.get("MAX_UPLOAD_MB", "20")) * 1024 * 1024
 
@@ -99,8 +107,9 @@ def places_autocomplete():
 
     Keeps the Places key in Secret Manager (exposed here as the
     GOOGLE_PLACES_API_KEY env var) instead of shipping it in the mobile app.
-    Restricts results to golf courses and returns the raw Places response so the
-    client can parse it directly.
+    Restricts results by `category` ("golf_course" or "city", defaulting to
+    "golf_course" for older clients) and returns the raw Places response so
+    the client can parse it directly.
     """
     api_key = os.environ.get("GOOGLE_PLACES_API_KEY")
     if not api_key:
@@ -111,8 +120,13 @@ def places_autocomplete():
     if len(user_input) < 2:
         return jsonify({"suggestions": []})
 
+    category = body.get("category") or "golf_course"
+    included_types = PLACES_CATEGORY_TYPES.get(
+        category, PLACES_CATEGORY_TYPES["golf_course"]
+    )
+
     payload = json.dumps(
-        {"input": user_input, "includedPrimaryTypes": ["golf_course"]}
+        {"input": user_input, "includedPrimaryTypes": included_types}
     ).encode("utf-8")
 
     proxied = urllib.request.Request(
